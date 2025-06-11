@@ -12,6 +12,8 @@ from collections import defaultdict, Counter
 import hashlib
 import json
 from datetime import datetime
+import numpy as np
+from math import sqrt, isclose
 
 @dataclass
 class ErrorReport:
@@ -50,7 +52,8 @@ class DXFAnalyzer:
     MIN_TEXT_HEIGHT_MM = 2.0
     MAX_FILE_SIZE_MB = 50.0
     
-    def __init__(self):
+    def __init__(self, min_distance_mm: float = 1.0):
+        self.min_distance_mm = min_distance_mm
         self.errors = []
         self.warnings = []
         self.export_errors = []
@@ -82,6 +85,10 @@ class DXFAnalyzer:
             self._validate_critical_errors()
             self._validate_warnings()
             self._validate_export_errors()
+            self._check_vector_distances()
+            self._check_layer_usage()
+            self._validate_entities()
+            self._check_dimensions()
             
             # Calcular porcentaje de salud
             health_percentage = self._calculate_health_percentage()
@@ -523,6 +530,194 @@ class DXFAnalyzer:
             recommendations.append("✅ Archivo listo para corte láser")
         
         return recommendations
+
+    def _check_vector_distances(self):
+        """Verifica las distancias mínimas entre vectores."""
+        msp = self.doc.modelspace()
+        entities = list(msp)
+        
+        for i, entity1 in enumerate(entities):
+            if not self._is_vector_entity(entity1):
+                continue
+                
+            points1 = self._get_entity_points(entity1)
+            
+            for entity2 in entities[i+1:]:
+                if not self._is_vector_entity(entity2):
+                    continue
+                    
+                points2 = self._get_entity_points(entity2)
+                
+                # Verificar distancia entre todos los puntos
+                for p1 in points1:
+                    for p2 in points2:
+                        distance = self._calculate_distance(p1, p2)
+                        if 0 < distance < self.min_distance_mm:
+                            self.errors.append(ErrorReport(
+                                error_id=25,
+                                error_type="CRITICAL",
+                                title="Vectores demasiado cercanos",
+                                description=f"Vectores demasiado cercanos ({distance:.2f}mm). La distancia mínima debe ser {self.min_distance_mm}mm.",
+                                cause="Distancias entre vectores muy pequeñas",
+                                suggestion="Aumentar la distancia entre vectores",
+                                affected_entities=[entity1.handle, entity2.handle],
+                                severity_score=10
+                            ))
+
+    def _is_vector_entity(self, entity) -> bool:
+        """Determina si una entidad es un vector."""
+        return entity.dxftype() in ['LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE']
+
+    def _get_entity_points(self, entity) -> List[Tuple[float, float, float]]:
+        """Obtiene los puntos de una entidad."""
+        points = []
+        
+        if entity.dxftype() == 'LINE':
+            points = [entity.dxf.start, entity.dxf.end]
+        elif entity.dxftype() in ['LWPOLYLINE', 'POLYLINE']:
+            points = [vertex.dxf.location for vertex in entity.vertices]
+        elif entity.dxftype() == 'ARC':
+            # Convertir arco a puntos
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            start_angle = entity.dxf.start_angle
+            end_angle = entity.dxf.end_angle
+            
+            # Crear puntos cada 5 grados
+            angles = np.linspace(start_angle, end_angle, 72)
+            for angle in angles:
+                x = center[0] + radius * np.cos(np.radians(angle))
+                y = center[1] + radius * np.sin(np.radians(angle))
+                points.append((x, y, center[2]))
+        elif entity.dxftype() == 'CIRCLE':
+            # Convertir círculo a puntos
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            
+            # Crear puntos cada 5 grados
+            angles = np.linspace(0, 360, 72)
+            for angle in angles:
+                x = center[0] + radius * np.cos(np.radians(angle))
+                y = center[1] + radius * np.sin(np.radians(angle))
+                points.append((x, y, center[2]))
+                
+        return points
+
+    def _calculate_distance(self, p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
+        """Calcula la distancia entre dos puntos."""
+        return sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2 + (p2[2] - p1[2])**2)
+
+    def _check_layer_usage(self):
+        """Verifica el uso correcto de capas."""
+        msp = self.doc.modelspace()
+        used_layers = set()
+        
+        for entity in msp:
+            used_layers.add(entity.dxf.layer)
+            
+        if not used_layers:
+            self.errors.append(ErrorReport(
+                error_id=26,
+                error_type="CRITICAL",
+                title="No se encontraron capas en uso en el archivo",
+                description="No se encontraron capas en uso en el archivo",
+                cause="No se encontraron capas en uso en el archivo",
+                suggestion="Asignar todas las entidades a capas válidas",
+                affected_entities=list(used_layers),
+                severity_score=10
+            ))
+
+    def _validate_entities(self):
+        """Valida las entidades del documento."""
+        msp = self.doc.modelspace()
+        
+        for entity in msp:
+            # Verificar entidades sin capa
+            if not hasattr(entity, 'dxf') or not hasattr(entity.dxf, 'layer'):
+                self.errors.append(ErrorReport(
+                    error_id=27,
+                    error_type="CRITICAL",
+                    title="Entidad sin capa asignada",
+                    description=f"Entidad sin capa asignada: {entity}",
+                    cause="Entidad sin capa asignada",
+                    suggestion="Asignar todas las entidades a capas válidas",
+                    affected_entities=[entity.dxf.handle],
+                    severity_score=10
+                ))
+            
+            # Verificar entidades muy pequeñas
+            if self._is_vector_entity(entity):
+                size = self._calculate_entity_size(entity)
+                if size < 1.0:  # 1mm mínimo
+                    self.warnings.append(ErrorReport(
+                        error_id=28,
+                        error_type="WARNING",
+                        title="Entidad muy pequeña",
+                        description=f"Entidad muy pequeña ({size:.2f}mm): {entity}",
+                        cause="Entidad muy pequeña",
+                        suggestion="Verificar tamaño de la entidad",
+                        affected_entities=[entity.dxf.handle],
+                        severity_score=5
+                    ))
+
+    def _calculate_entity_size(self, entity) -> float:
+        """Calcula el tamaño de una entidad."""
+        if entity.dxftype() == 'LINE':
+            return self._calculate_distance(entity.dxf.start, entity.dxf.end)
+        elif entity.dxftype() in ['LWPOLYLINE', 'POLYLINE']:
+            points = [vertex.dxf.location for vertex in entity.vertices]
+            if len(points) < 2:
+                return 0
+            return sum(self._calculate_distance(points[i], points[i+1]) 
+                      for i in range(len(points)-1))
+        elif entity.dxftype() == 'ARC':
+            return 2 * np.pi * entity.dxf.radius * (entity.dxf.end_angle - entity.dxf.start_angle) / 360
+        elif entity.dxftype() == 'CIRCLE':
+            return 2 * np.pi * entity.dxf.radius
+        return 0
+
+    def _check_dimensions(self):
+        """Verifica las dimensiones del documento."""
+        msp = self.doc.modelspace()
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+        
+        for entity in msp:
+            if self._is_vector_entity(entity):
+                points = self._get_entity_points(entity)
+                for point in points:
+                    min_x = min(min_x, point[0])
+                    min_y = min(min_y, point[1])
+                    max_x = max(max_x, point[0])
+                    max_y = max(max_y, point[1])
+        
+        if min_x != float('inf'):
+            width = max_x - min_x
+            height = max_y - min_y
+            
+            if width > 3000 or height > 3000:  # 3 metros máximo
+                self.warnings.append(ErrorReport(
+                    error_id=29,
+                    error_type="WARNING",
+                    title="Dimensiones muy grandes",
+                    description=f"Dimensiones muy grandes: {width:.0f}mm x {height:.0f}mm",
+                    cause="Dimensiones muy grandes",
+                    suggestion="Verificar tamaño del archivo",
+                    affected_entities=["FILE"],
+                    severity_score=5
+                ))
+            
+            if width < 5 or height < 5:  # 5mm mínimo
+                self.warnings.append(ErrorReport(
+                    error_id=30,
+                    error_type="WARNING",
+                    title="Dimensiones muy pequeñas",
+                    description=f"Dimensiones muy pequeñas: {width:.0f}mm x {height:.0f}mm",
+                    cause="Dimensiones muy pequeñas",
+                    suggestion="Verificar tamaño del archivo",
+                    affected_entities=["FILE"],
+                    severity_score=5
+                ))
 
 # Funciones auxiliares para la API
 def analyze_dxf_file(file_path: str) -> Dict[str, Any]:
