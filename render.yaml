@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: dxf-analyzer-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn src.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.8.0
+      - key: DEBUG
+        value: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: API_VERSION
+        value: v1
+      - key: MAX_FILE_SIZE_MB
+        value: 50.0
+      - key: UPLOAD_FOLDER
+        value: ./uploads
+      - key: MIN_SIZE_MM
+        value: 5.0
+      - key: MAX_SIZE_MM
+        value: 3000.0
+      - key: MIN_TEXT_HEIGHT_MM
+        value: 2.0
+      - key: MAX_POLYLINE_POINTS
+        value: 100 
